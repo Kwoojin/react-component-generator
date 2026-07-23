@@ -1,5 +1,6 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import type { GeneratedComponent, Provider } from '../types';
+import { loadComponents, saveComponents } from '../lib/componentStorage';
 
 interface UseComponentGeneratorReturn {
   components: GeneratedComponent[];
@@ -11,9 +12,15 @@ interface UseComponentGeneratorReturn {
 }
 
 export function useComponentGenerator(): UseComponentGeneratorReturn {
-  const [components, setComponents] = useState<GeneratedComponent[]>([]);
+  const [components, setComponents] = useState<GeneratedComponent[]>(loadComponents);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // components가 바뀔 때마다 localStorage에 저장한다.
+  // 생성·삭제·전체삭제가 모두 이 상태를 거치므로 한 곳에서 영속화가 보장된다.
+  useEffect(() => {
+    saveComponents(components);
+  }, [components]);
 
   const generate = useCallback(async (prompt: string, apiKey: string | undefined, provider: Provider) => {
     setIsLoading(true);
