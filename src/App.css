@@ -117,13 +117,6 @@
 .settings-panel,
 .component-card,
 .empty-state,
-.loading-card {
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  box-shadow: var(--shadow-sm);
-}
-
 .composer-panel {
   padding: 24px;
 }
@@ -457,17 +450,32 @@
   height: 68px;
 }
 
-.loading-card {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 20px;
+.streaming-card {
   margin-bottom: 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
 }
 
-.loading-pulse {
-  width: 18px;
-  height: 18px;
+.streaming-card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 20px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.streaming-card-header p {
+  color: var(--text-muted);
+  font-size: 0.95rem;
+}
+
+.streaming-dot {
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
   background: var(--primary);
   animation: pulse 1.2s ease-in-out infinite;
@@ -485,9 +493,40 @@
   }
 }
 
-.loading-card p {
-  color: var(--text-muted);
-  font-size: 0.95rem;
+/* 최종 CodeView(.code-block)와 같은 톤으로, 코드가 실시간으로 흘러들어오는 패널. */
+.streaming-code {
+  min-height: 320px;
+  max-height: 520px;
+  margin: 0;
+  padding: 22px;
+  overflow: auto;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+  font-size: 0.9rem;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.streaming-cursor {
+  display: inline-block;
+  width: 8px;
+  height: 1.05em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: #38bdf8;
+  animation: blink 1s step-end infinite;
+}
+
+@keyframes blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
 }
 
 .results-grid {
