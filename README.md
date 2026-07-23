@@ -28,6 +28,13 @@ bun run dev
 - `.env`에 API 키를 설정하면 UI에서 별도 입력 없이 바로 사용 가능
 - `.env` 없이도 UI에서 직접 API 키를 입력하여 사용 가능
 
+## 테스트
+
+```bash
+bun run test          # 전체 테스트 1회 실행
+bun run test:watch    # 변경 감지 watch 모드
+```
+
 ## 주요 기능
 
 - **멀티 프로바이더**: Anthropic Claude / Google Gemini 선택
