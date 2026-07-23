@@ -1,5 +1,6 @@
 import { stripCodeFences, ensureRenderCall } from './generator';
 import { withModelFallback } from './fallback';
+import { parseSSEBuffer, parseAnthropicEvent, parseGoogleEvent, type SSEParseResult } from './stream';
 
 // 우선순위 순서. 앞 모델이 실패하면 다음 모델로 폴백한다.
 const GOOGLE_MODELS = ['gemini-3.1-flash-lite', 'gemini-3.5-flash'];
@@ -65,7 +66,11 @@ function resolveApiKey(provider: Provider, clientKey?: string): string | null {
   return clientKey || ENV_KEYS[provider] || null;
 }
 
-async function callAnthropic(prompt: string, apiKey: string): Promise<string> {
+const CODE_TOO_LONG_ERROR = '생성된 코드가 너무 길어 잘렸습니다. 더 간단한 컴포넌트를 요청해주세요.';
+const STREAM_ERROR = 'AI 응답 생성 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.';
+
+// SSE 스트림 응답을 연다. !ok면 throw해 withModelFallback이 다음 모델로 넘어가게 한다.
+async function streamAnthropic(prompt: string, apiKey: string): Promise<Response> {
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -76,6 +81,7 @@ async function callAnthropic(prompt: string, apiKey: string): Promise<string> {
     body: JSON.stringify({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 4096,
+      stream: true,
       system: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: prompt }],
     }),
@@ -84,19 +90,11 @@ async function callAnthropic(prompt: string, apiKey: string): Promise<string> {
   if (!response.ok) {
     throw new Error(`Claude API error: ${response.status}`);
   }
-
-  const data = (await response.json()) as {
-    content: Array<{ type: string; text?: string }>;
-  };
-
-  return data.content
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text)
-    .join('');
+  return response;
 }
 
-async function callGoogleModel(prompt: string, apiKey: string, model: string): Promise<string> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+async function streamGoogleModel(prompt: string, apiKey: string, model: string): Promise<Response> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`;
 
   const response = await fetch(url, {
     method: 'POST',
@@ -111,28 +109,103 @@ async function callGoogleModel(prompt: string, apiKey: string, model: string): P
   if (!response.ok) {
     throw new Error(`Gemini API error: ${response.status}`);
   }
-
-  const data = (await response.json()) as {
-    candidates: Array<{
-      content: { parts: Array<{ text?: string }> };
-      finishReason?: string;
-    }>;
-  };
-
-  const candidate = data.candidates?.[0];
-  if (candidate?.finishReason === 'MAX_TOKENS') {
-    throw new Error('생성된 코드가 너무 길어 잘렸습니다. 더 간단한 컴포넌트를 요청해주세요.');
-  }
-
-  return (
-    candidate?.content?.parts
-      ?.map((part) => part.text)
-      ?.join('') ?? ''
-  );
+  return response;
 }
 
-async function callGoogle(prompt: string, apiKey: string): Promise<string> {
-  return withModelFallback(GOOGLE_MODELS, (model) => callGoogleModel(prompt, apiKey, model));
+async function streamGoogle(prompt: string, apiKey: string): Promise<Response> {
+  return withModelFallback(GOOGLE_MODELS, (model) => streamGoogleModel(prompt, apiKey, model));
+}
+
+// AI provider의 SSE 응답을 읽어 클라이언트용 NDJSON 스트림으로 릴레이한다.
+//   - delta: 실시간 표시용 원본 텍스트 조각(정규화 전)
+//   - done : stripCodeFences → ensureRenderCall로 정규화한 실행 가능 코드(딱 한 번)
+//   - error: 사용자용 한국어 오류 메시지
+// 골든룰: 실제 실행되는 코드(done.code)는 반드시 서버 정규화를 거친다. delta는 표시 전용이다.
+function relayStream(
+  aiResponse: Response,
+  parseEvent: (payload: string) => SSEParseResult,
+): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      // 클라이언트가 이미 끊겼으면 enqueue가 throw하므로 조용히 무시한다.
+      const send = (obj: unknown) => {
+        try {
+          controller.enqueue(encoder.encode(`${JSON.stringify(obj)}\n`));
+        } catch {
+          /* controller closed (client disconnected) */
+        }
+      };
+
+      const body = aiResponse.body;
+      if (!body) {
+        send({ type: 'error', error: STREAM_ERROR });
+        controller.close();
+        return;
+      }
+
+      reader = body.getReader();
+      let buffer = '';
+      let full = '';
+      let truncated = false;
+      let providerError: string | null = null;
+
+      const consume = (payloads: string[]) => {
+        for (const payload of payloads) {
+          const { text, truncated: isTruncated, error } = parseEvent(payload);
+          if (error) providerError = error;
+          if (isTruncated) truncated = true;
+          if (text) {
+            full += text;
+            send({ type: 'delta', text });
+          }
+        }
+      };
+
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const { payloads, remainder } = parseSSEBuffer(buffer);
+          buffer = remainder;
+          consume(payloads);
+        }
+        // 스트림 종료 후 남은 미완결 조각을 flush한다.
+        const tail = buffer + decoder.decode();
+        if (tail.trim()) {
+          consume(parseSSEBuffer(tail.endsWith('\n') ? tail : `${tail}\n`).payloads);
+        }
+
+        if (providerError) {
+          send({ type: 'error', error: STREAM_ERROR });
+        } else if (truncated) {
+          send({ type: 'error', error: CODE_TOO_LONG_ERROR });
+        } else {
+          send({ type: 'done', code: ensureRenderCall(stripCodeFences(full)) });
+        }
+      } catch {
+        send({ type: 'error', error: STREAM_ERROR });
+      } finally {
+        try {
+          controller.close();
+        } catch {
+          /* already closed */
+        }
+      }
+    },
+    // 소비자(브라우저)가 스트림을 취소하면 상류 provider 연결도 해제한다.
+    async cancel() {
+      try {
+        await reader?.cancel();
+      } catch {
+        /* noop */
+      }
+    },
+  });
 }
 
 const server = Bun.serve({
@@ -180,14 +253,21 @@ const server = Bun.serve({
           );
         }
 
-        const text =
+        // AI provider의 SSE 스트림을 연다. 여기서 나는 오류(!ok)는 아래 catch에서
+        // 상태코드→한국어 메시지로 변환한다(스트림 본문이 시작되기 전이므로 JSON 응답 가능).
+        const aiResponse =
           provider === 'google'
-            ? await callGoogle(prompt, resolvedKey)
-            : await callAnthropic(prompt, resolvedKey);
+            ? await streamGoogle(prompt, resolvedKey)
+            : await streamAnthropic(prompt, resolvedKey);
+        const parseEvent = provider === 'google' ? parseGoogleEvent : parseAnthropicEvent;
 
-        const code = ensureRenderCall(stripCodeFences(text));
-
-        return Response.json({ code }, { headers: CORS_HEADERS });
+        return new Response(relayStream(aiResponse, parseEvent), {
+          headers: {
+            ...CORS_HEADERS,
+            'Content-Type': 'application/x-ndjson; charset=utf-8',
+            'Cache-Control': 'no-cache',
+          },
+        });
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Unknown error';
 
