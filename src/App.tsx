@@ -19,7 +19,7 @@ function App() {
     anthropic: false,
     google: false,
   });
-  const { components, isLoading, error, generate, removeComponent, clearAll } =
+  const { components, isLoading, error, streamingCode, generate, removeComponent, clearAll } =
     useComponentGenerator();
 
   useEffect(() => {
@@ -163,9 +163,15 @@ function App() {
         )}
 
         {isLoading && (
-          <div className="loading-card">
-            <div className="loading-pulse" />
-            <p>컴포넌트를 생성하고 있습니다...</p>
+          <div className="streaming-card">
+            <div className="streaming-card-header">
+              <span className="streaming-dot" aria-hidden="true" />
+              <p>{streamingCode ? '코드를 생성하는 중...' : '컴포넌트를 생성하고 있습니다...'}</p>
+            </div>
+            <pre className="streaming-code" aria-live="polite">
+              <code>{streamingCode}</code>
+              <span className="streaming-cursor" aria-hidden="true" />
+            </pre>
           </div>
         )}
 
